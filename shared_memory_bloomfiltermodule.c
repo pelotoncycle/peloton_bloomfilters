@@ -1,4 +1,4 @@
-#include "shared_memory_bloomfiltermodule.h"
+#include<Python.h>
 #include<fcntl.h>
 #include<math.h>
 #include<stddef.h>
@@ -83,7 +83,6 @@ inline int bloomfilter_probes(double error_rate) {
 
 
 size_t bloomfilter_size(uint64_t capacity, double error_rate) {
-  int probes = fabs(log(1 / error_rate));
   uint64_t bits = ceil(2 * capacity * fabs(log(error_rate))) / (log(2) * log(2));
   if (bits % 64)
     bits += 64 - bits % 64;
@@ -173,12 +172,24 @@ void shared_memory_bloomfilter_destroy(bloomfilter_t *bloomfilter) {
 PyObject *
 shared_memory_bloomfilter_len(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
   bloomfilter_t *bloomfilter = smbo->bf;
-  return PyInt_FromLong(bloomfilter->counter);
+  return PyInt_FromLong(*bloomfilter->counter);
 }
+
+inline PyObject *
+shared_memory_bloomfilter_clear(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
+  bloomfilter_t *bf = smbo->bf;
+  size_t length = bf->length;
+  size_t i;
+  uint64_t *data = __builtin_assume_aligned(bf->bits, 16);
+  for(i=0; i<length; ++i)
+    data[i] = 0;
+  *bf->counter = bf->capacity;
+  Py_RETURN_NONE;
+}
+
 
 PyObject *
 shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *item) {
-  uint64_t *data = __builtin_assume_aligned(bloomfilter->bits, 16);
   bloomfilter_t *bloomfilter = smbo->bf;
   int probes = bloomfilter->probes;
   size_t length = bloomfilter->length;
@@ -186,10 +197,12 @@ shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *ite
   if (hash == (uint64_t)(-1))
     return NULL;
 
-  uint64_t cleared=!(__atomic_fetch_sub(bloomfilter->counter, (uint64_t)1, 0));
-  if (cleared || added > bloomfilter->capacity) {
-    Py_DECREF(shared_memory_bloomfilter_clear(smbo, NULL);
+  uint64_t count=(__atomic_fetch_sub(bloomfilter->counter, (uint64_t)1, 0));
+  uint64_t cleared = !count;
+  if (cleared || count > bloomfilter->capacity) {
+    Py_DECREF(shared_memory_bloomfilter_clear(smbo, NULL));
   }
+  uint64_t *data = __builtin_assume_aligned(smbo->bf->bits, 16);
 
   while (probes--) {
     __atomic_or_fetch(data + (hash >> 6) % length, 1<<(hash & 0x3f), 1);
@@ -217,18 +230,6 @@ shared_memory_bloomfilter_contains(SharedMemoryBloomfilterObject *smbo, PyObject
   Py_RETURN_TRUE;
 }
 
-inline PyObject *
-shared_memory_bloomfilter_clear(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
-  struct bloomfilter_t *bf = smbo->bf;
-  size_t length = bf->length;
-  size_t i;
-  uint64_t *data = __builtin_assume_aligned(bf->bits, 16);
-  for(i=0; i<length; ++i)
-    data[i] = 0;
-  *bf->counter = bf->capacity;
-  Py_RETURN_NONE;
-}
-
 PyObject *
 shared_memory_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
   size_t length = smbo->bf->length;
@@ -250,6 +251,44 @@ static PyMethodDef shared_memory_bloomfilter_methods[] = {
   {NULL, NULL}
 };
 
+static void shared_memory_bloomfilter_type_dealloc(SharedMemoryBloomfilterObject *smbo) {
+    Py_TRASHCAN_SAFE_BEGIN(smbo);
+  if (smbo->weakreflist != NULL)
+    PyObject_ClearWeakRefs((PyObject *)smbo);
+  shared_memory_bloomfilter_destroy(smbo->bf);
+
+  Py_TRASHCAN_SAFE_END(smbo);
+}
+
+PyObject *
+make_new_shared_memory_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity, double error_rate);
+
+
+static int 
+shared_memory_bloomfilter_init(SharedMemoryBloomfilterObject *self, PyObject *args, PyObject *kwargs) {
+  return 0;
+}
+
+static PyObject *
+shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+
+  int fd;
+  uint64_t capacity;
+  double error_rate;
+  static char *kwlist[] = {"fp", "capacity", "error_rate", NULL};
+
+  PyArg_ParseTupleAndKeywords(args,
+			      kwargs,
+			      "i|ld",
+			      kwlist,
+			      &fd,
+			      &capacity,
+			      &error_rate);
+  			      
+  PyObject *smbo = make_new_shared_memory_bloomfilter(type, fd, capacity, error_rate);
+
+  return (PyObject *)smbo;
+}
 
 PyTypeObject SharedMemoryBloomfilterType = {
   PyVarObject_HEAD_INIT(&PyType_Type, 0)
@@ -294,40 +333,16 @@ PyTypeObject SharedMemoryBloomfilterType = {
   PyObject_GC_Del,		/* tp_free */
 };
 
-static void shared_memory_bloomfilter_type_dealloc(SharedMemoryBloomfilterObject *smbo) {
-    Py_TRASHCAN_SAFE_BEGIN(smbo);
-  if (smbo->weakreflist != NULL)
-    PyObject_ClearWeakRefs((PyObject *)smbo);
-  shared_memory_bloomfilter_destroy(smbo->bf);
-
-  Py_TRASHCAN_SAFE_END(smbo);
-}
-
-static PyObject *
-shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject **kwargs) {
-
-  int fd;
-  uint64_t capacity;
-  double error_rate;
-  PyArg_ParseTupleAndKeywords
-    (args,
-     kwargs,
-     "i|ld",
-     {"fp", "capacity", "error_rate"},
-     &fd,
-     &capacity,
-     &error_rate);
-  			      
-			      
+PyObject *
+make_new_shared_memory_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity, double error_rate) {
   SharedMemoryBloomfilterObject *smbo = PyObject_GC_New(SharedMemoryBloomfilterObject, &SharedMemoryBloomfilterType);;
   
   if (!(smbo->bf= create_bloomfilter(fd, capacity, error_rate))) {
     return NULL;
   }
-  so->weakreflist = NULL;
-  return (PyObject *)smbo;
+  smbo->weakreflist = NULL;
+  return smbo;
 }
-
 
 static PyMethodDef shared_memory_bloomfiltermodule_methods[] = {
   {NULL, NULL, 0, NULL}
