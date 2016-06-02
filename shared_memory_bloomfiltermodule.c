@@ -86,7 +86,7 @@ bloomfilter_t *peloton_shared_bloomfilter(int fd, uint64_t capacity, double erro
   if (stats.st_size == 0) {
     bloomfilter->probes = peloton_bloomfilter_probes(error_rate);
     bloomfilter->length = (peloton_bloomfilter_size(capacity, error_rate) + 63) / 64;
-    write(fd, "Peloton Bloom Filter 0.0", 24);
+    write(fd, "SharedMemory BloomFilter", 24);
     write(fd, &capacity, sizeof(uint64_t));
     write(fd, &error_rate, sizeof(uint64_t));
     write(fd, &capacity, sizeof(uint64_t));
@@ -194,7 +194,7 @@ int peloton_add_to_bloomfilter(uint64_t hash, bloomfilter_t *bloomfilter) {
 }
 
 
-int peloton_test_bloomfilter(uint64_t hash, bloomfilter_t *bloomfilter) {
+int shared_memory_bloomfilter_(uint64_t hash, bloomfilter_t *bloomfilter) {
   uint64_t *data = __builtin_assume_aligned(bloomfilter->bits, 16);
   int probes = bloomfilter->probes;
   size_t length = bloomfilter->length;
@@ -207,7 +207,7 @@ int peloton_test_bloomfilter(uint64_t hash, bloomfilter_t *bloomfilter) {
   return 1;
 }
 
-inline void peloton_clear_bloomfilter(bloomfilter_t *bloomfilter) {
+inline void shared_memory_bloomfilter_clear(bloomfilter_t *bloomfilter) {
   size_t length = bloomfilter->length;
   size_t i;
   uint64_t *data = __builtin_assume_aligned(bloomfilter->bits, 16);
@@ -216,7 +216,7 @@ inline void peloton_clear_bloomfilter(bloomfilter_t *bloomfilter) {
   *bloomfilter->counter = bloomfilter->capacity;
 }
 
-uint64_t peloton_bloomfilter_population(bloomfilter_t *bloomfilter) {
+uint64_t shared_memory_bloomfilter_len(bloomfilter_t *bloomfilter) {
   size_t length = bloomfilter->length;
   size_t i;
   uint64_t *data = __builtin_assume_aligned(bloomfilter->bits, 16);
@@ -225,3 +225,79 @@ uint64_t peloton_bloomfilter_population(bloomfilter_t *bloomfilter) {
     population += __builtin_popcountll(data[i]);
   return population;
 }
+
+
+static PyMethodDef shared_memory_bloomfilter_methods[] = {
+  {"add", (PyCFunction)shared_memory_bloomfilter_contains, METH_O, NULL},
+  {"__len__", (PyCFunction)shared_memory_bloomfilter_len, METH_NOARGS, NULL},
+  {"clear", (PyCFunction)shared_memory_bloomfilter_clear, METH_O, NULL},
+  {"__contains__", (PyCFunction)pshared_memory_bloomfilter_contains, METH_O, NULL},
+  {NULL, NULL}
+};
+
+
+PyTypeObject PelotonLeaderboard_Type = {
+  PyVarObject_HEAD_INIT(&PyType_Type, 0)
+  "SharedMemoryBloomfilter", /* tp_name */
+  sizeof(SharedMemoryBloomfilterObject), /*tp_basicsize*/
+  0, /*tp_itemsize */
+  (destructor)shared_memory_bloomfilter_type_dealloc, /* tp_dealloc */
+  0, /* tp_print */
+  0, /*tp_getattr*/
+  0, /*tp_setattr*/
+  0, /*tp_cmp*/
+  0, /*tp_repr*/
+  0, /* tp_as_number */
+  0, /* tp_as_sequence */
+  0, /* tp_as_mapping */
+  (hashfunc)PyObject_HashNotImplemented, /*tp_hash */
+  0, /* tp_call */
+  0, /* tp_str */
+  PyObject_GenericGetAttr, /* tp_getattro */
+  0, /* tp_setattro */
+  0, /* tp_as_buffer */
+  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_CHECKTYPES |
+  Py_TPFLAGS_BASETYPE,	/* tp_flags */
+  0, /* tp_doc */
+  0, /* tp_traverse */
+  0, /* tp_clear */
+  0, /* tp_richcompare */
+  offsetof(SharedMemoryBloomfilterObject, weakreflist), /* tp_weaklistoffset */
+  0, /* tp_iter */
+  0, /* tp_iternext */
+  shared_memory_bloomfilter_methods, /* tp_methods */
+  0, /* tp_members */
+  0, /* tp_genset */
+  0, /* tp_base */
+  0, /* tp_dict */
+  0,				/* tp_descr_get */
+  0,				/* tp_descr_set */
+  0,				/* tp_dictoffset */
+  (initproc)peloton_leaderboard_init,		/* tp_init */
+  PyType_GenericAlloc,		/* tp_alloc */
+  leaderboard_new,			/* tp_new */
+  PyObject_GC_Del,		/* tp_free */
+};
+
+static PyObject *
+make_new_leaderboard(PyTypeObject *type, const char *path) {
+  LeaderboardObject *so = PyObject_GC_New(LeaderboardObject, &PelotonLeaderboard_Type);;
+  PyObject_GC_Track(so);
+  if (!(so->lb = open_l(path))) {
+    return NULL;
+  }
+  so->weakreflist = NULL;
+  return (PyObject *)so;
+}
+
+
+static PyMethodDef shared_memory_bloomfiltermodule_methods[] = {
+  {NULL, NULL, 0, NULL}
+};
+
+PyMODINIT_FUNC
+initshared_memory_bloomfilter(void) {
+  PyObject *m = Py_InitModule("shared_memory_bloomfilter", shared_memory_bloomfiltermodule_methods);
+  Py_INCREF(&PelotonLeaderboard_Type);
+  PyModule_AddObject(m, "Leaderboard", (PyObject *)&PelotonLeaderboard_Type);
+};
