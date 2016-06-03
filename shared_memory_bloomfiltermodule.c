@@ -103,12 +103,11 @@ static bloomfilter_t *create_bloomfilter(int fd, uint64_t capacity, double error
   if (!(bloomfilter = malloc(sizeof(bloomfilter_t))))
     return NULL;
   flock(fd, LOCK_EX);
-  if (fstat(fd, &stats)) {
-    flock(fd, LOCK_UN);
-    free(bloomfilter);
-    return NULL;
-  }
+
+  if (fstat(fd, &stats)) 
+    goto error;
   if (stats.st_size == 0) {
+    bloomfilter->capacity = capacity;
     bloomfilter->probes = bloomfilter_probes(error_rate);
     bloomfilter->length = (bloomfilter_size(capacity, error_rate) + 63) / 64;
     write(fd, HEADER, 24);
@@ -120,23 +119,15 @@ static bloomfilter_t *create_bloomfilter(int fd, uint64_t capacity, double error
   } else {
     lseek(fd, 0, 0);
     read(fd, magicbuffer, 24);
-    if (strncmp(magicbuffer, HEADER, 24)) {
-      flock(fd, LOCK_UN);
-      free(bloomfilter);
-      return NULL;
-    }
+    if (strncmp(magicbuffer, HEADER, 24)) 
+      goto error;
 
-    if (read(fd, &bloomfilter->capacity, sizeof(uint64_t)) < sizeof(uint64_t)) {
-      flock(fd, LOCK_UN);
-      free(bloomfilter);
-      return NULL;
-    }
+    if (read(fd, &bloomfilter->capacity, sizeof(uint64_t)) < sizeof(uint64_t)) 
+      goto error;
 
-    if (read(fd, &bloomfilter->error_rate, sizeof(double)) < sizeof(double)) {
-      flock(fd, LOCK_UN);
-      free(bloomfilter);
-      return NULL;
-    }
+    if (read(fd, &bloomfilter->error_rate, sizeof(double)) < sizeof(double)) 
+      goto error;
+
     bloomfilter->probes = bloomfilter_probes(bloomfilter->error_rate);
     bloomfilter->length = (bloomfilter_size(bloomfilter->capacity, bloomfilter->error_rate) + 63) / 64;
   }
@@ -148,14 +139,19 @@ static bloomfilter_t *create_bloomfilter(int fd, uint64_t capacity, double error
                            MAP_SHARED | MAP_HASSEMAPHORE,
                            fd,
                            0);
-  if (!bloomfilter->mmap) {
-    free(bloomfilter);
-    return NULL;
-  }
+  if (!bloomfilter->mmap) 
+    goto error;
+
   madvise(bloomfilter->mmap, bloomfilter->mmap_size, MADV_RANDOM);
   bloomfilter->counter = bloomfilter->mmap + 24 + sizeof(double) + sizeof(uint64_t);
   bloomfilter->bits = bloomfilter->counter + sizeof(uint64_t);
   return bloomfilter;
+
+ error:
+  flock(fd, LOCK_UN);
+  if (bloomfilter) free(bloomfilter);
+  return NULL;
+
 }
 
 
@@ -196,6 +192,8 @@ shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *ite
     Py_DECREF(shared_memory_bloomfilter_clear(smbo, NULL));
   }
   uint64_t *data = __builtin_assume_aligned(smbo->bf->bits, 16);
+  printf("Saving hash %ld of %s\n", hash, PyString_AS_STRING(PyObject_Repr(item))); 
+  
 
   while (probes--) {
     __atomic_or_fetch(data + (hash >> 6) % length, 1<<(hash & 0x3f), 1);
@@ -218,22 +216,24 @@ shared_memory_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObje
 static Py_ssize_t
 SharedMemoryBloomFilterObject_len(SharedMemoryBloomfilterObject* smbo)
 {
-    return *smbo->bf->counter;
+  printf("Capacity %d\n", smbo->bf->capacity);
+    return smbo->bf->capacity - *smbo->bf->counter;
 }
 
 static int
 SharedMemoryBloomFilterObject_contains(SharedMemoryBloomfilterObject* smbo, PyObject *item)
 {
+  printf("Calling contains\n");
   bloomfilter_t *bloomfilter = smbo->bf;
   uint64_t *data = __builtin_assume_aligned(bloomfilter->bits, 16);
   int probes = bloomfilter->probes;
   size_t length = bloomfilter->length;
   uint64_t hash = PyObject_Hash(item);
+  printf("Retriving hash %ld\n", hash); 
   if (hash == (uint64_t)(-1))
     return -1;
-
   while (probes--) {
-    if (!(1<<(hash & 0x3f) & __atomic_or_fetch(data + (hash >> 6) % length, 0, 1)))
+    if (!(1<<(hash & 0x3f) & *(data + (hash >> 6) % length)))
        return 0;
     hash = xxh64(hash);
   }
@@ -292,7 +292,7 @@ shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwar
 
   PyArg_ParseTupleAndKeywords(args,
 			      kwargs,
-			      "i|ld",
+			      "ild",
 			      kwlist,
 			      &fd,
 			      &capacity,

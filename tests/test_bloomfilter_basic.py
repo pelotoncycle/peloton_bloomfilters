@@ -16,5 +16,5 @@ class TestSharedBloomfilter(TestCase):
     def test_add(self):
         self.assertEqual(0, len(self.bloomfilter))
         self.assertNotIn("5", self.bloomfilter)
-        self.bloomfilter.add("5")
+        self.assertFalse(self.bloomfilter.add("5"))
         self.assertIn("5", self.bloomfilter)
