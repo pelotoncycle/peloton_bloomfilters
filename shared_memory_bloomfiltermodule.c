@@ -162,7 +162,7 @@ static void shared_memory_bloomfilter_destroy(bloomfilter_t *bloomfilter) {
     free(bloomfilter->bits);
   }
   if (bloomfilter->fd)
-    free(bloomfilter->fd);
+    close(bloomfilter->fd);
   free(bloomfilter);
 }
 
@@ -283,41 +283,24 @@ shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwar
 
   int fd = 0;
   char *path = NULL;
-  PyObject *source = NULL;
   uint64_t capacity = 1000;
   double error_rate = 1.0 / 128.0;
   static char *kwlist[] = {"file", "capacity", "error_rate", NULL};
 
   PyArg_ParseTupleAndKeywords(args,
 			      kwargs,
-			      "O|ld",
+			      "s|ld",
 			      kwlist,
-			      &source,
+			      &path,
 			      &capacity,
 			      &error_rate);
-  printf("ok\n");
-  if (PyString_Check(source)) {
-    printf("Path\n");
-    path = PyString_AS_STRING(source);
-    fd = open(path, O_CREAT, ~0);
-    if (fd == -1)
-      return PyErr_SetFromErrnoWithFilename(PyExc_IOError, path);
-  } else {
-    printf("Int\n");
-    if (PyInt_Check(source)) {
-      fd = PyInt_AsLong(source);
-    } else {
-      PyErr_SetString(PyExc_TypeError, "must provide a path string or int fileno\n");
-    }
-  }
-  printf("Open(%s %d)\n", path, fd);
-  
-    
-  PyObject *smbo = make_new_shared_memory_bloomfilter(type, dup(fd), capacity, error_rate);
-  printf("And done\n");
-  if (path)
-    close(fd);
 
+  fd = open(path, O_CREAT|O_RDWR, ~0);
+  if (fd == -1)
+    return PyErr_SetFromErrnoWithFilename(PyExc_IOError, path);
+  PyObject *smbo = make_new_shared_memory_bloomfilter(type, fd, capacity, error_rate);
+  if (!smbo)
+    return PyErr_SetFromErrnoWithFilename(PyExc_IOError, path);
   return (PyObject *)smbo;
 }
 
@@ -367,6 +350,8 @@ PyObject *
 make_new_shared_memory_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity, double error_rate) {
   SharedMemoryBloomfilterObject *smbo = PyObject_GC_New(SharedMemoryBloomfilterObject, &SharedMemoryBloomfilterType);;
   
+  if (!smbo)
+    return NULL;
   if (!(smbo->bf= create_bloomfilter(fd, capacity, error_rate))) {
     return NULL;
   }
