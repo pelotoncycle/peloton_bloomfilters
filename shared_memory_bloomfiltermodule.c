@@ -192,7 +192,6 @@ shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *ite
     Py_DECREF(shared_memory_bloomfilter_clear(smbo, NULL));
   }
   uint64_t *data = __builtin_assume_aligned(smbo->bf->bits, 16);
-  printf("Saving hash %ld of %s\n", hash, PyString_AS_STRING(PyObject_Repr(item))); 
   
 
   while (probes--) {
@@ -216,46 +215,41 @@ shared_memory_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObje
 static Py_ssize_t
 SharedMemoryBloomFilterObject_len(SharedMemoryBloomfilterObject* smbo)
 {
-  printf("Capacity %d\n", smbo->bf->capacity);
     return smbo->bf->capacity - *smbo->bf->counter;
 }
 
-static int
+int 
 SharedMemoryBloomFilterObject_contains(SharedMemoryBloomfilterObject* smbo, PyObject *item)
 {
-  printf("Calling contains\n");
   bloomfilter_t *bloomfilter = smbo->bf;
   uint64_t *data = __builtin_assume_aligned(bloomfilter->bits, 16);
   int probes = bloomfilter->probes;
   size_t length = bloomfilter->length;
   uint64_t hash = PyObject_Hash(item);
-  printf("Retriving hash %ld\n", hash); 
-  if (hash == (uint64_t)(-1))
+  if (hash == (uint64_t)(-1)) {
     return -1;
+  }
+    
   while (probes--) {
     if (!(1<<(hash & 0x3f) & *(data + (hash >> 6) % length)))
-       return 0;
+      return 0;
     hash = xxh64(hash);
   }
   return 1;
 }
 
-static PyObject *
-SharedMemoryBloomFilterObject_get(SharedMemoryBloomfilterObject* smbo, Py_ssize_t i)
-{
-  return NULL;
-}
 
 static PySequenceMethods SharedMemoryBloomfilterObject_sequence_methods = {
-    SharedMemoryBloomFilterObject_len, /* sq_length */
-    0, /* sq_concat */
-    0, /* sq_repeat */
-    SharedMemoryBloomFilterObject_get, /* sq_item */
-    0, /* sq_ass_item */
-    SharedMemoryBloomFilterObject_contains,/* sq_contains */
-    0,
-    0
+  SharedMemoryBloomFilterObject_len, /* sq_length */
+  0,				/* sq_concat */
+  0,				/* sq_repeat */
+  0,				/* sq_item */
+  0,				/* sq_slice */
+  0,				/* sq_ass_item */
+  0,				/* sq_ass_slice */
+  (objobjproc)SharedMemoryBloomFilterObject_contains,	/* sq_contains */
 };
+
 
 static PyMethodDef shared_memory_bloomfilter_methods[] = {
   {"add", (PyCFunction)shared_memory_bloomfilter_add, METH_O, NULL},
@@ -315,16 +309,15 @@ PyTypeObject SharedMemoryBloomfilterType = {
   0, /*tp_cmp*/
   0, /*tp_repr*/
   0, /* tp_as_number */
-  &SharedMemoryBloomfilterObject_sequence_methods, /* tp_as_sequence */
-  0, /* tp_as_mapping */
+  &SharedMemoryBloomfilterObject_sequence_methods, /* tp_as_seqeunce */
+  0, 
   (hashfunc)PyObject_HashNotImplemented, /*tp_hash */
   0, /* tp_call */
   0, /* tp_str */
   PyObject_GenericGetAttr, /* tp_getattro */
   0, /* tp_setattro */
   0, /* tp_as_buffer */
-  Py_TPFLAGS_DEFAULT | Py_TPFLAGS_CHECKTYPES |
-  Py_TPFLAGS_BASETYPE,	/* tp_flags */
+  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
   0, /* tp_doc */
   0, /* tp_traverse */
   0, /* tp_clear */
