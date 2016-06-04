@@ -4,6 +4,29 @@ from unittest import TestCase
 import shared_memory_bloomfilter
 
 
+class TestDivideByMultiple(TestCase):
+
+    def assert_divides(self, D):
+        multiplier, pre_shift, post_shift, increment = shared_memory_bloomfilter._compute_unsigned_magic_info(D, 64)
+        n = 1
+        while n < D**3:
+            n *= 1.41
+            N = int(n)
+            N += increment
+            N = N >> pre_shift
+            if multiplier != 1:
+                N *= multiplier
+                N = N >> 64
+                N = N % (2 ** 64)
+            N = N >> post_shift
+            self.assertEquals(N, int(n) / D)
+
+    def test(self):
+        for x in xrange(1, 1000):
+            print x
+            self.assert_divides(x)
+
+
 class TestSharedBloomfilter(TestCase):
 
     def setUp(self):

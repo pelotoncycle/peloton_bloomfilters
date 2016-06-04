@@ -5,6 +5,8 @@
 #include<stdint.h>
 #include<stdio.h>
 #include<stdlib.h>
+#include<limits.h>
+#include<assert.h>
 #include<string.h>
 #include<sys/file.h>
 #include<sys/mman.h>
@@ -30,6 +32,14 @@
 #endif
 
 
+struct magicu_info {
+  uint64_t multiplier; // the "magic number" multiplier
+  uint64_t pre_shift; // shift for the dividend before multiplying
+  uint64_t post_shift; //shift for the dividend after multiplying
+  int64_t increment; // 0 or 1; if set then increment the numerator, using one of the two strategies
+};
+
+
 typedef struct {
   int fd;
   uint64_t capacity;
@@ -42,8 +52,8 @@ typedef struct {
   uint64_t *counter;
   uint64_t local_counter;
   int invert;
+  struct magicu_info divisor;
 } bloomfilter_t;
-
 
 
 typedef struct _shared_memory_bloomfilter_object SharedMemoryBloomfilterObject;
@@ -73,6 +83,73 @@ inline uint64_t xxh64(uint64_t k1) {
   h64 ^= h64 >> 32;
   return h64;
 }
+
+// https://raw.githubusercontent.com/ridiculousfish/libdivide/master/divide_by_constants_codegen_reference.c
+
+
+struct magicu_info compute_unsigned_magic_info(uint64_t D, uint64_t num_bits) {
+  struct magicu_info result;
+    
+  const uint64_t UINT_BITS = sizeof(uint64_t) * CHAR_BIT;
+  const uint64_t extra_shift = UINT_BITS - num_bits;
+  const uint64_t initial_power_of_2 = (uint64_t)1 << (UINT_BITS-1);
+
+  uint64_t quotient = initial_power_of_2 / D, remainder = initial_power_of_2 % D;
+
+  uint64_t ceil_log_2_D;
+
+  uint64_t down_multiplier = 0;
+  uint64_t down_exponent = 0;
+  int64_t has_magic_down = 0;
+
+  ceil_log_2_D = 0;
+  uint64_t tmp;
+  for (tmp = D; tmp > 0; tmp >>= 1)
+    ceil_log_2_D += 1;
+    
+  uint64_t exponent;
+  for (exponent = 0; ; exponent++) {
+    if (remainder >= D - remainder) {
+      quotient = quotient * 2 + 1;
+      remainder = remainder * 2 - D;
+    } else {
+      quotient = quotient * 2;
+      remainder = remainder * 2;
+    }
+
+    if ((exponent + extra_shift >= ceil_log_2_D) || (D - remainder) <= ((uint64_t)1 << (exponent + extra_shift)))
+      break;
+            
+    if (! has_magic_down && remainder <= ((uint64_t)1 << (exponent + extra_shift))) {
+      has_magic_down = 1;
+      down_multiplier = quotient;
+      down_exponent = exponent;
+    }
+  }
+        
+  if (exponent < ceil_log_2_D) {
+    result.multiplier = quotient + 1;
+    result.pre_shift = 0;
+    result.post_shift = exponent;
+    result.increment = 0;
+  } else if (D & 1) {
+    result.multiplier = down_multiplier;
+    result.pre_shift = 0;
+    result.post_shift = down_exponent;
+    result.increment = 1;
+  } else {
+    uint64_t pre_shift = 0;
+    uint64_t shifted_D = D;
+    while ((shifted_D & 1) == 0) {
+      shifted_D >>= 1;
+      pre_shift += 1;
+    }
+    result = compute_unsigned_magic_info(shifted_D, num_bits - pre_shift);
+    result.pre_shift = pre_shift;
+  }
+  return result;
+}
+
 
 
 inline int bloomfilter_probes(double error_rate) {
@@ -110,6 +187,7 @@ static bloomfilter_t *create_bloomfilter(int fd, uint64_t capacity, double error
     bloomfilter->capacity = capacity;
     bloomfilter->probes = bloomfilter_probes(error_rate);
     bloomfilter->length = (bloomfilter_size(capacity, error_rate) + 63) / 64;
+    bloomfilter->divisor = compute_unsigned_magic_info(bloomfilter->length * 64, 64);
     write(fd, HEADER, 24);
     write(fd, &capacity, sizeof(uint64_t));
     write(fd, &error_rate, sizeof(uint64_t));
@@ -130,6 +208,8 @@ static bloomfilter_t *create_bloomfilter(int fd, uint64_t capacity, double error
 
     bloomfilter->probes = bloomfilter_probes(bloomfilter->error_rate);
     bloomfilter->length = (bloomfilter_size(bloomfilter->capacity, bloomfilter->error_rate) + 63) / 64;
+    bloomfilter->divisor = compute_unsigned_magic_info(bloomfilter->length * 64, 64);
+
   }
   flock(fd, LOCK_UN);
   bloomfilter->mmap_size = 24 + sizeof(double) + sizeof(uint64_t)*3 + bloomfilter->length * sizeof(uint64_t);
@@ -195,9 +275,21 @@ shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *ite
   }
   uint64_t *data = __builtin_assume_aligned(smbo->bf->bits, 16);
   
+  uint64_t offset;
+  uint64_t multiplier = smbo->bf->divisor.multiplier;
+  uint64_t pre_shift = smbo->bf->divisor.pre_shift;
+  uint64_t post_shift = smbo->bf->divisor.post_shift;
+  uint64_t increment = smbo->bf->divisor.increment; 
 
   while (probes--) {
-    __atomic_or_fetch(data + (hash >> 6) % length, 1<<(hash & 0x3f), 1);
+    offset = hash;
+    offset += increment;
+    offset >>= pre_shift;
+    if (multiplier != 1) 
+      offset = (((__uint128_t)offset * (__uint128_t)multiplier)) >> 64;
+    offset >>= post_shift;
+    offset = hash - offset * smbo->bf->length * 64;
+    __atomic_or_fetch(data + (offset >> 6), 1<<(hash & 0x3f), 1);
     hash = xxh64(hash);
   }
   return PyBool_FromLong(cleared);
@@ -232,8 +324,22 @@ SharedMemoryBloomFilterObject_contains(SharedMemoryBloomfilterObject* smbo, PyOb
     return -1;
   }
     
+  uint64_t offset;
+  uint64_t multiplier = smbo->bf->divisor.multiplier;
+  uint64_t pre_shift = smbo->bf->divisor.pre_shift;
+  uint64_t post_shift = smbo->bf->divisor.post_shift;
+  uint64_t increment = smbo->bf->divisor.increment; 
+
   while (probes--) {
-    if (!(1<<(hash & 0x3f) & *(data + (hash >> 6) % length)))
+    offset = hash;
+    offset += increment;
+    offset >>= pre_shift;
+    if (multiplier != 1) 
+      offset = (((__uint128_t)offset * (__uint128_t)multiplier)) >> 64;
+    offset >>= post_shift;
+    offset = hash - offset * smbo->bf->length * 64;
+
+    if (!(1<<(hash & 0x3f) & *(data + (offset >> 6))))
       return 0;
     hash = xxh64(hash);
   }
@@ -277,6 +383,49 @@ static int
 shared_memory_bloomfilter_init(SharedMemoryBloomfilterObject *self, PyObject *args, PyObject *kwargs) {
   return 0;
 }
+
+
+static PyObject *
+shared_memory_bloomfilter_compute_unsigned_magic_info
+(PyObject *self, PyObject *args, PyObject *kwargs) {
+  static char *kwlist[] = {"divisor", "number_of_bits", NULL};
+  uint64_t divisor;
+  uint64_t number_of_bits;
+  PyArg_ParseTupleAndKeywords
+    (args, 
+     kwargs,
+     "ll",
+     kwlist,
+     &divisor,
+     &number_of_bits);
+
+  struct magicu_info magic = compute_unsigned_magic_info(divisor, number_of_bits);
+
+  PyObject *retval = PyTuple_New(4);
+  if (!retval)
+    return NULL;
+  PyObject *multiplier = PyInt_FromSize_t(magic.multiplier);
+  
+  if (!multiplier)
+    return NULL;
+  PyObject *pre_shift = PyInt_FromLong(magic.pre_shift);
+  if (!pre_shift)
+    return NULL;
+  PyObject *post_shift = PyInt_FromLong(magic.post_shift);
+  if (!post_shift)
+    return NULL;
+  PyObject *increment = PyBool_FromLong(magic.increment);
+  if (!increment)
+    return NULL;
+
+  PyTuple_SET_ITEM(retval, 0, multiplier);
+  PyTuple_SET_ITEM(retval, 1, pre_shift);
+  PyTuple_SET_ITEM(retval, 2, post_shift);
+  PyTuple_SET_ITEM(retval, 3, increment);
+
+  return retval;
+}
+
 
 static PyObject *
 shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
@@ -359,8 +508,10 @@ make_new_shared_memory_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity
   return smbo;
 }
 
+
 static PyMethodDef shared_memory_bloomfiltermodule_methods[] = {
-  {NULL, NULL, 0, NULL}
+  {"_compute_unsigned_magic_info", shared_memory_bloomfilter_compute_unsigned_magic_info, METH_VARARGS | METH_KEYWORDS, "Compute divide by multiply constants"},
+    {NULL, NULL, 0, NULL}
 };
 
 PyMODINIT_FUNC
