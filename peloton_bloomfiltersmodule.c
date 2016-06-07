@@ -17,6 +17,10 @@
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
+#ifndef __builtin_assume_aligned
+#define __builtin_assume_aligned(X, Y) (X)
+#endif
+
 // A reduced complexity, sizeof(uint64_t) only implementation of XXHASH
 
 #undef USE_MOD
@@ -36,10 +40,6 @@
 #define __atomic_fetch_sub(X, Y, Z) __sync_fetch_and_sub(X, Y)
 #endif
 
-
-#ifndef __builtin_assume_align
-#define __builtin_assume_align(X, Y) X;
-#endif 
 
 struct magicu_info {
   uint64_t multiplier; // the "magic number" multiplier
