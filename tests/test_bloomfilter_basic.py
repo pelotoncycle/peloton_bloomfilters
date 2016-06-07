@@ -1,13 +1,13 @@
 import tempfile
 from unittest import TestCase
 
-import peloton_bloomfilter
+import peloton_bloomfilters
 
 
 class TestDivideByMultiple(TestCase):
 
     def assert_divides(self, D):
-        multiplier, pre_shift, post_shift, increment = peloton_bloomfilter._compute_unsigned_magic_info(D, 64)
+        multiplier, pre_shift, post_shift, increment = peloton_bloomfilters._compute_unsigned_magic_info(D, 64)
         n = 1
         while n < D**3:
             n *= 1.41
@@ -46,19 +46,19 @@ class BloomFilterCase(object):
         self.assertIn(50, self.bloomfilter)
 
 
-class TestBloomFilter(TestCase, BloomFi8lterCase):
+class TestBloomFilter(TestCase, BloomFilterCase):
     def setUp(self):
-        self.bloomfilter = peloton_bloomfilter.BloomFilter(50, 0.001)
+        self.bloomfilter = peloton_bloomfilters.BloomFilter(50, 0.001)
 
 class TestThreadSafeBloomFilter(TestCase, BloomFilterCase):
     def setUp(self):
-        self.bloomfilter = peloton_bloomfilter.ThreadSafeBloomFilter(50, 0.001)
+        self.bloomfilter = peloton_bloomfilters.ThreadSafeBloomFilter(50, 0.001)
 
 
 class TestSharedMemoryBloomFilter(TestCase, BloomFilterCase):
     def setUp(self):
         self.fd = tempfile.NamedTemporaryFile()
-        self.bloomfilter = peloton_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
+        self.bloomfilter = peloton_bloomfilters.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
 
     def tearDown(self):
         self.fd.close()
@@ -66,7 +66,7 @@ class TestSharedMemoryBloomFilter(TestCase, BloomFilterCase):
     def test_sharing(self):
         print "Test started\n"
         bf1 = self.bloomfilter
-        bf2 = peloton_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
+        bf2 = peloton_bloomfilters.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
         self.assertEquals(len(bf2), 0)
         self.assertNotIn(1, bf1)
         self.assertNotIn(1, bf2)
@@ -83,7 +83,7 @@ class TestSharedMemoryBloomFilter(TestCase, BloomFilterCase):
         
     def test_capacity_in_sync(self):
         bf1 = self.bloomfilter
-        bf2 = peloton_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
+        bf2 = peloton_bloomfilters.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
         bfs = [bf1, bf2]
         for i in xrange(50):
             bfs[i % 2].add(i)
