@@ -14,6 +14,9 @@
 #include<sys/types.h>
 #include<unistd.h>
 
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+
 // A reduced complexity, sizeof(uint64_t) only implementation of XXHASH
 
 #undef USE_MOD
@@ -311,7 +314,8 @@ peloton_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *item) {
   if (hash == (uint64_t)(-1))
     return NULL;
 
-  uint64_t count=(__atomic_fetch_sub(bloomfilter->counter, (uint64_t)1, 0));
+  bloomfilter->counter -= 1;
+  uint64_t count = bloomfilter->counter;
   uint64_t cleared = !count;
   if (cleared || count > bloomfilter->capacity) {
     Py_DECREF(peloton_bloomfilter_clear(smbo, NULL));
@@ -337,10 +341,10 @@ peloton_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *item) {
     offset = hash;
     offset += increment;
     offset >>= pre_shift;
-    if (multiplier != 1) 
+    if (likely(multiplier != 1)) 
       offset = (((__uint128_t)offset * (__uint128_t)multiplier)) >> 64;
     offset >>= post_shift;
-    offset = hash - offset * smbo->bf->length * 64;
+    offset = hash - offset * length * 64;
     data[offset >> 6] |= 1 << (hash & 0x3f);
     hash = xxh64(hash);
   }
@@ -385,10 +389,10 @@ peloton_shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObj
     offset = hash;
     offset += increment;
     offset >>= pre_shift;
-    if (multiplier != 1) 
+    if (likely(multiplier != 1)) 
       offset = (((__uint128_t)offset * (__uint128_t)multiplier)) >> 64;
     offset >>= post_shift;
-    offset = hash - offset * smbo->bf->length * 64;
+    offset = hash - offset * length * 64;
     __atomic_or_fetch(data + (offset >> 6), 1<<(hash & 0x3f), 1);
     hash = xxh64(hash);
   }
@@ -748,8 +752,8 @@ static PyMethodDef peloton_bloomfiltermodule_methods[] = {
 };
 
 PyMODINIT_FUNC
-initpeloton_bloomfilter(void) {
-  PyObject *m = Py_InitModule("peloton_bloomfilter", peloton_bloomfiltermodule_methods);
+initpeloton_bloomfilters(void) {
+  PyObject *m = Py_InitModule("peloton_bloomfilters", peloton_bloomfiltermodule_methods);
   Py_INCREF(&SharedMemoryBloomfilterType);
   PyModule_AddObject(m, "SharedMemoryBloomFilter", (PyObject *)&SharedMemoryBloomfilterType);
   Py_INCREF(&ThreadSafeBloomfilterType);

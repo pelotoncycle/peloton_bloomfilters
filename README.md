@@ -1,7 +1,7 @@
 # Bloomin fast Bloomfilters from Peloton 
 
 `peloton_bloomfilter.SharedMemoryBloomfilter` is the easiest to use,
-fastest and only thread safe bloomfilter implementation for cPython.
+fastest bloomfilter implementation for cPython.
 
 
 ##  Usage

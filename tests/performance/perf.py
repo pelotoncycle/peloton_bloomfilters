@@ -1,6 +1,6 @@
 import tempfile
 import time
-import shared_memory_bloomfilter
+import peloton_bloomfilters
 
 NS = 10**9
 for _p in xrange(1,3):
@@ -10,7 +10,7 @@ for _p in xrange(1,3):
             X = int(1000 * 10 ** (e / 2.0))
             print X, p, 
             name = f.name
-            bloomfilter = shared_memory_bloomfilter.SharedMemoryBloomFilter(name,  X+ 1, 1.0 / p)
+            bloomfilter = peloton_bloomfilters.SharedMemoryBloomFilter(name,  X+ 1, 1.0 / p)
             t = time.time()
 
             for x in xrange(X):
