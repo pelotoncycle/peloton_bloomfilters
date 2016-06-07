@@ -1,13 +1,13 @@
 import tempfile
 from unittest import TestCase
 
-import shared_memory_bloomfilter
+import peloton_bloomfilter
 
 
 class TestDivideByMultiple(TestCase):
 
     def assert_divides(self, D):
-        multiplier, pre_shift, post_shift, increment = shared_memory_bloomfilter._compute_unsigned_magic_info(D, 64)
+        multiplier, pre_shift, post_shift, increment = peloton_bloomfilter._compute_unsigned_magic_info(D, 64)
         n = 1
         while n < D**3:
             n *= 1.41
@@ -27,15 +27,7 @@ class TestDivideByMultiple(TestCase):
             self.assert_divides(x)
 
 
-class TestSharedBloomfilter(TestCase):
-
-    def setUp(self):
-        self.fd = tempfile.NamedTemporaryFile()
-        self.bloomfilter = shared_memory_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
-
-    def tearDown(self):
-        self.fd.close()
-
+class BloomFilterCase(object):
     def test_add(self):
         self.assertEqual(0, len(self.bloomfilter))
         self.assertNotIn("5", self.bloomfilter)
@@ -54,10 +46,27 @@ class TestSharedBloomfilter(TestCase):
         self.assertIn(50, self.bloomfilter)
 
 
+class TestBloomFilter(TestCase, BloomFilterCase):
+    def setUp(self):
+        self.bloomfilter = peloton_bloomfilter.BloomFilter(50, 0.001)
+
+class TestThreadSafeBloomFilter(TestCase, BloomFilterCase):
+    def setUp(self):
+        self.bloomfilter = peloton_bloomfilter.ThreadSafeBloomFilter(50, 0.001)
+
+
+class TestSharedMemoryBloomFilter(TestCase, BloomFilterCase):
+    def setUp(self):
+        self.fd = tempfile.NamedTemporaryFile()
+        self.bloomfilter = peloton_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
+
+    def tearDown(self):
+        self.fd.close()
+
     def test_sharing(self):
         print "Test started\n"
         bf1 = self.bloomfilter
-        bf2 = shared_memory_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
+        bf2 = peloton_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
         self.assertEquals(len(bf2), 0)
         self.assertNotIn(1, bf1)
         self.assertNotIn(1, bf2)
@@ -74,7 +83,7 @@ class TestSharedBloomfilter(TestCase):
         
     def test_capacity_in_sync(self):
         bf1 = self.bloomfilter
-        bf2 = shared_memory_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
+        bf2 = peloton_bloomfilter.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
         bfs = [bf1, bf2]
         for i in xrange(50):
             bfs[i % 2].add(i)

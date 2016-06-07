@@ -16,6 +16,8 @@
 
 // A reduced complexity, sizeof(uint64_t) only implementation of XXHASH
 
+#undef USE_MOD
+
 #define PRIME_1 11400714785074694791ULL
 #define PRIME_2 14029467366897019727ULL
 #define PRIME_3  1609587929392839161ULL
@@ -31,6 +33,10 @@
 #define __atomic_fetch_sub(X, Y, Z) __sync_fetch_and_sub(X, Y)
 #endif
 
+
+#ifndef __builtin_assume_align
+#define __builtin_assume_align(X, Y) X;
+#endif 
 
 struct magicu_info {
   uint64_t multiplier; // the "magic number" multiplier
@@ -56,12 +62,15 @@ typedef struct {
 } bloomfilter_t;
 
 
-typedef struct _shared_memory_bloomfilter_object SharedMemoryBloomfilterObject;
-struct _shared_memory_bloomfilter_object {
+typedef struct _peloton_bloomfilter_object SharedMemoryBloomfilterObject;
+typedef struct _peloton_bloomfilter_object ThreadSafeBloomfilterObject;
+typedef struct _peloton_bloomfilter_object BloomfilterObject;
+struct _peloton_bloomfilter_object {
   PyObject HEAD;
   bloomfilter_t *bf;
-  PyObject *weakreflist;
 };
+
+
 
 static inline uint64_t rotl(uint64_t x, uint64_t r) {
   return ((x >> (64 - r)) | (x << r));
@@ -161,19 +170,50 @@ inline int bloomfilter_probes(double error_rate) {
 
 size_t bloomfilter_size(uint64_t capacity, double error_rate) {
   uint64_t bits = ceil(2 * capacity * fabs(log(error_rate))) / (log(2) * log(2));
-  if (bits % 64)
-    bits += 64 - bits % 64;
+  if (bits % (CHAR_BIT * sizeof(uint64_t)))
+      bits += (CHAR_BIT * sizeof(uint64_t)) - bits % (CHAR_BIT * sizeof(uint64_t));
   return bits;
 }
 
-const char HEADER[] = "SharedMemory BloomFilter";
+bloomfilter_t *create_private_bloomfilter(uint64_t capacity, double error_rate) {
+  bloomfilter_t *bloomfilter;
+  int probes = bloomfilter_probes(error_rate);
+  if (probes == -1)
+    return NULL;
 
+  if (!(bloomfilter = malloc(sizeof(bloomfilter_t))))
+    return NULL;
+  bloomfilter->fd = 0;
+  bloomfilter->capacity = capacity;
+  bloomfilter->error_rate = error_rate;
+  bloomfilter->length = (bloomfilter_size(capacity, error_rate) + 63 ) / 64;
+  bloomfilter->probes = probes;
+  bloomfilter->mmap_size = 0;
+  bloomfilter->mmap = NULL;
+  if (!(bloomfilter->bits = calloc(sizeof(uint64_t), bloomfilter->length))) {
+    free(bloomfilter);
+    return NULL;
+  }
+  bloomfilter->counter = &bloomfilter->local_counter;
+
+  bloomfilter->local_counter = capacity;
+  bloomfilter->invert = 0;
+  bloomfilter->divisor = compute_unsigned_magic_info(bloomfilter->length * 64, 64);
+
+  return bloomfilter;
+}
+
+const char HEADER[] = "SharedMemory BloomFilter";
 
 static bloomfilter_t *create_bloomfilter(int fd, uint64_t capacity, double error_rate) {
   bloomfilter_t *bloomfilter;
   char magicbuffer[25];
   uint64_t i;
   uint64_t zero=0;
+
+  if (fd == 0) {
+    return create_private_bloomfilter(capacity, error_rate);
+  }
   struct stat stats;
   if (-1 == bloomfilter_probes(error_rate))
     return NULL;
@@ -235,19 +275,22 @@ static bloomfilter_t *create_bloomfilter(int fd, uint64_t capacity, double error
 }
 
 
-static void shared_memory_bloomfilter_destroy(bloomfilter_t *bloomfilter) {
-  if (bloomfilter->mmap && bloomfilter->mmap_size) {
+static void peloton_bloomfilter_destroy(bloomfilter_t *bloomfilter) {
+  free(bloomfilter->bits);
+  free(bloomfilter);
+}
+
+static void peloton_shared_memory_bloomfilter_destroy(bloomfilter_t *bloomfilter) {
+  if (bloomfilter->mmap)
     munmap(bloomfilter->mmap, bloomfilter->mmap_size);
-  } else {
-    free(bloomfilter->bits);
-  }
+
   if (bloomfilter->fd)
     close(bloomfilter->fd);
   free(bloomfilter);
 }
 
 static PyObject *
-shared_memory_bloomfilter_clear(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
+peloton_bloomfilter_clear(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
   bloomfilter_t *bf = smbo->bf;
   size_t length = bf->length;
   size_t i;
@@ -260,7 +303,7 @@ shared_memory_bloomfilter_clear(SharedMemoryBloomfilterObject *smbo, PyObject *_
 
 
 static PyObject *
-shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *item) {
+peloton_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *item) {
   bloomfilter_t *bloomfilter = smbo->bf;
   int probes = bloomfilter->probes;
   size_t length = bloomfilter->length;
@@ -271,10 +314,67 @@ shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *ite
   uint64_t count=(__atomic_fetch_sub(bloomfilter->counter, (uint64_t)1, 0));
   uint64_t cleared = !count;
   if (cleared || count > bloomfilter->capacity) {
-    Py_DECREF(shared_memory_bloomfilter_clear(smbo, NULL));
+    Py_DECREF(peloton_bloomfilter_clear(smbo, NULL));
   }
   uint64_t *data = __builtin_assume_aligned(smbo->bf->bits, 16);
   
+  #ifdef USE_MOD
+  while (1) {
+    data[(hash >> 6 ) % length] |= 1 << (hash & 0x3f);
+    if (!probes--) break;
+    hash = xxh64(hash);
+  }
+  #endif
+
+  #ifndef USE_MOD
+  uint64_t offset;
+  uint64_t multiplier = smbo->bf->divisor.multiplier;
+  uint64_t pre_shift = smbo->bf->divisor.pre_shift;
+  uint64_t post_shift = smbo->bf->divisor.post_shift;
+  uint64_t increment = smbo->bf->divisor.increment; 
+
+  while (probes--) {
+    offset = hash;
+    offset += increment;
+    offset >>= pre_shift;
+    if (multiplier != 1) 
+      offset = (((__uint128_t)offset * (__uint128_t)multiplier)) >> 64;
+    offset >>= post_shift;
+    offset = hash - offset * smbo->bf->length * 64;
+    data[offset >> 6] |= 1 << (hash & 0x3f);
+    hash = xxh64(hash);
+  }
+  #endif
+  return PyBool_FromLong(cleared);
+}
+
+
+static PyObject *
+peloton_shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *item) {
+  bloomfilter_t *bloomfilter = smbo->bf;
+  int probes = bloomfilter->probes;
+  size_t length = bloomfilter->length;
+  uint64_t hash = PyObject_Hash(item);
+  if (hash == (uint64_t)(-1))
+    return NULL;
+
+  uint64_t count=(__atomic_fetch_sub(bloomfilter->counter, (uint64_t)1, 0));
+  uint64_t cleared = !count;
+  if (cleared || count > bloomfilter->capacity) {
+    Py_DECREF(peloton_bloomfilter_clear(smbo, NULL));
+  }
+  uint64_t *data = __builtin_assume_aligned(smbo->bf->bits, 16);
+  Py_BEGIN_ALLOW_THREADS
+  
+  #ifdef USE_MOD
+  while (1) {
+    __atomic_or_fetch(data + (hash >> 6 ) % length, 1 << (hash & 0x3f), 1);
+    if (!probes--) break;
+    hash = xxh64(hash);
+  }
+  #endif
+
+  #ifndef USE_MOD
   uint64_t offset;
   uint64_t multiplier = smbo->bf->divisor.multiplier;
   uint64_t pre_shift = smbo->bf->divisor.pre_shift;
@@ -292,11 +392,13 @@ shared_memory_bloomfilter_add(SharedMemoryBloomfilterObject *smbo, PyObject *ite
     __atomic_or_fetch(data + (offset >> 6), 1<<(hash & 0x3f), 1);
     hash = xxh64(hash);
   }
+  #endif
+  Py_END_ALLOW_THREADS
   return PyBool_FromLong(cleared);
 }
 
 PyObject *
-shared_memory_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
+peloton_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObject *_) {
   size_t length = smbo->bf->length;
   size_t i;
   uint64_t *data = __builtin_assume_aligned(smbo->bf->bits, 16);
@@ -307,13 +409,13 @@ shared_memory_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObje
 }
 
 static Py_ssize_t
-SharedMemoryBloomFilterObject_len(SharedMemoryBloomfilterObject* smbo)
+BloomFilterObject_len(SharedMemoryBloomfilterObject* smbo)
 {
     return smbo->bf->capacity - *smbo->bf->counter;
 }
 
 int 
-SharedMemoryBloomFilterObject_contains(SharedMemoryBloomfilterObject* smbo, PyObject *item)
+BloomFilterObject_contains(SharedMemoryBloomfilterObject* smbo, PyObject *item)
 {
   bloomfilter_t *bloomfilter = smbo->bf;
   uint64_t *data = __builtin_assume_aligned(bloomfilter->bits, 16);
@@ -324,6 +426,18 @@ SharedMemoryBloomFilterObject_contains(SharedMemoryBloomfilterObject* smbo, PyOb
     return -1;
   }
     
+  #ifdef USE_MOD
+  while (1) {
+    if (!(1<<(hash & 0x3f) & *(data + (hash >> 6) % length)))
+      return 0;
+    if (!probes--)
+      return 1;
+    hash = xxh64(hash);
+  }
+  #endif
+
+  #ifndef USE_MOD
+
   uint64_t offset;
   uint64_t multiplier = smbo->bf->divisor.multiplier;
   uint64_t pre_shift = smbo->bf->divisor.pre_shift;
@@ -338,55 +452,68 @@ SharedMemoryBloomFilterObject_contains(SharedMemoryBloomfilterObject* smbo, PyOb
       offset = (((__uint128_t)offset * (__uint128_t)multiplier)) >> 64;
     offset >>= post_shift;
     offset = hash - offset * smbo->bf->length * 64;
-
-    if (!(1<<(hash & 0x3f) & *(data + (offset >> 6))))
+    if (!(1<<(offset & 0x3f) & *(data + (offset >> 6))))
       return 0;
     hash = xxh64(hash);
   }
   return 1;
+  #endif
+
 }
 
 
 static PySequenceMethods SharedMemoryBloomfilterObject_sequence_methods = {
-  SharedMemoryBloomFilterObject_len, /* sq_length */
+  BloomFilterObject_len, /* sq_length */
   0,				/* sq_concat */
   0,				/* sq_repeat */
   0,				/* sq_item */
   0,				/* sq_slice */
   0,				/* sq_ass_item */
   0,				/* sq_ass_slice */
-  (objobjproc)SharedMemoryBloomFilterObject_contains,	/* sq_contains */
+  (objobjproc)BloomFilterObject_contains,	/* sq_contains */
 };
 
 
-static PyMethodDef shared_memory_bloomfilter_methods[] = {
-  {"add", (PyCFunction)shared_memory_bloomfilter_add, METH_O, NULL},
-  {"clear", (PyCFunction)shared_memory_bloomfilter_clear, METH_O, NULL},
-  {"population", (PyCFunction)shared_memory_bloomfilter_population, METH_NOARGS, NULL},
+static PyMethodDef peloton_shared_memory_bloomfilter_methods[] = {
+  {"add", (PyCFunction)peloton_shared_memory_bloomfilter_add, METH_O, NULL},
+  {"clear", (PyCFunction)peloton_bloomfilter_clear, METH_O, NULL},
+  {"population", (PyCFunction)peloton_bloomfilter_population, METH_NOARGS, NULL},
   {NULL, NULL}
 };
 
-static void shared_memory_bloomfilter_type_dealloc(SharedMemoryBloomfilterObject *smbo) {
+static PyMethodDef peloton_bloomfilter_methods[] = {
+  {"add", (PyCFunction)peloton_bloomfilter_add, METH_O, NULL},
+  {"clear", (PyCFunction)peloton_bloomfilter_clear, METH_O, NULL},
+  {"population", (PyCFunction)peloton_bloomfilter_population, METH_NOARGS, NULL},
+  {NULL, NULL}
+};
+
+static void peloton_bloomfilter_type_dealloc(SharedMemoryBloomfilterObject *smbo) {
     Py_TRASHCAN_SAFE_BEGIN(smbo);
-  if (smbo->weakreflist != NULL)
-    PyObject_ClearWeakRefs((PyObject *)smbo);
-  shared_memory_bloomfilter_destroy(smbo->bf);
+  peloton_bloomfilter_destroy(smbo->bf);
+
+  Py_TRASHCAN_SAFE_END(smbo);
+}
+
+static void peloton_shared_memory_bloomfilter_type_dealloc(SharedMemoryBloomfilterObject *smbo) {
+  Py_TRASHCAN_SAFE_BEGIN(smbo);
+  peloton_shared_memory_bloomfilter_destroy(smbo->bf);
 
   Py_TRASHCAN_SAFE_END(smbo);
 }
 
 PyObject *
-make_new_shared_memory_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity, double error_rate);
+make_new_peloton_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity, double error_rate);
 
 
 static int 
-shared_memory_bloomfilter_init(SharedMemoryBloomfilterObject *self, PyObject *args, PyObject *kwargs) {
+peloton_bloomfilter_init(SharedMemoryBloomfilterObject *self, PyObject *args, PyObject *kwargs) {
   return 0;
 }
 
 
 static PyObject *
-shared_memory_bloomfilter_compute_unsigned_magic_info
+peloton_bloomfilter_compute_unsigned_magic_info
 (PyObject *self, PyObject *args, PyObject *kwargs) {
   static char *kwlist[] = {"divisor", "number_of_bits", NULL};
   uint64_t divisor;
@@ -428,7 +555,7 @@ shared_memory_bloomfilter_compute_unsigned_magic_info
 
 
 static PyObject *
-shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+peloton_shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
 
   int fd = 0;
   char *path = NULL;
@@ -445,25 +572,47 @@ shared_memory_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwar
 			      &error_rate);
 
   fd = open(path, O_CREAT|O_RDWR, ~0);
-  if (fd == -1)
+  if (fd == -1) {
     return PyErr_SetFromErrnoWithFilename(PyExc_IOError, path);
-  PyObject *smbo = make_new_shared_memory_bloomfilter(type, fd, capacity, error_rate);
+  }
+  PyObject *smbo = make_new_peloton_bloomfilter(type, fd, capacity, error_rate);
   if (!smbo)
+    {
     return PyErr_SetFromErrnoWithFilename(PyExc_IOError, path);
+    }
   return (PyObject *)smbo;
+}
+
+static PyObject *
+peloton_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
+  static char *kwlist[] = {"capacity", "error_rate", NULL};
+
+  uint64_t capacity;
+  double error_rate;
+  PyArg_ParseTupleAndKeywords(args,
+			      kwargs,
+			      "ld",
+			      kwlist,
+			      &capacity,
+			      &error_rate);
+
+  BloomfilterObject *obj = make_new_peloton_bloomfilter(type, NULL, capacity, error_rate);
+  if (!obj)
+    PyErr_NoMemory();
+  return (PyObject *)obj;
 }
 
 PyTypeObject SharedMemoryBloomfilterType = {
   PyVarObject_HEAD_INIT(&PyType_Type, 0)
   "SharedMemoryBloomfilter", /* tp_name */
-  sizeof(SharedMemoryBloomfilterObject), /*tp_basicsize*/
-  0, /*tp_itemsize */
-  (destructor)shared_memory_bloomfilter_type_dealloc, /* tp_dealloc */
+  sizeof(SharedMemoryBloomfilterObject), /* tp_basicsize */
+  0, /* tp_itemsize */
+  (destructor)peloton_shared_memory_bloomfilter_type_dealloc, /* tp_dealloc */
   0, /* tp_print */
-  0, /*tp_getattr*/
-  0, /*tp_setattr*/
-  0, /*tp_cmp*/
-  0, /*tp_repr*/
+  0, /* tp_getattr */
+  0, /* tp_setattr */
+  0, /* tp_cmp */
+  0, /* tp_repr */
   0, /* tp_as_number */
   &SharedMemoryBloomfilterObject_sequence_methods, /* tp_as_seqeunce */
   0, 
@@ -478,10 +627,52 @@ PyTypeObject SharedMemoryBloomfilterType = {
   0, /* tp_traverse */
   0, /* tp_clear */
   0, /* tp_richcompare */
-  offsetof(SharedMemoryBloomfilterObject, weakreflist), /* tp_weaklistoffset */
+  0, /* tp_weaklistoffset */
   0, /* tp_iter */
   0, /* tp_iternext */
-  shared_memory_bloomfilter_methods, /* tp_methods */
+  peloton_shared_memory_bloomfilter_methods, /* tp_methods */
+  0, /* tp_members */
+  0, /* tp_genset */
+  0, /* tp_base */
+  0, /* tp_dict */
+  0, /* tp_descr_get */
+  0,				/* tp_descr_set */
+  0,				/* tp_dictoffset */
+  (initproc)peloton_bloomfilter_init,		/* tp_init */
+  PyType_GenericAlloc,		/* tp_alloc */
+  peloton_shared_memory_bloomfilter_new,			/* tp_new */
+  0, 
+};
+
+PyTypeObject ThreadSafeBloomfilterType = {
+  PyVarObject_HEAD_INIT(&PyType_Type, 0)
+  "ThreadSafeBloomfilter", /* tp_name */
+  sizeof(ThreadSafeBloomfilterObject), /* tp_basicsize */
+  0, /* tp_itemsize */
+  (destructor)peloton_bloomfilter_type_dealloc, /* tp_dealloc */
+  0, /* tp_print */
+  0, /* tp_getattr */
+  0, /* tp_setattr */
+  0, /* tp_cmp */
+  0, /* tp_repr */
+  0, /* tp_as_number */
+  &SharedMemoryBloomfilterObject_sequence_methods, /* tp_as_seqeunce */
+  0, 
+  (hashfunc)PyObject_HashNotImplemented, /*tp_hash */
+  0, /* tp_call */
+  0, /* tp_str */
+  PyObject_GenericGetAttr, /* tp_getattro */
+  0, /* tp_setattro */
+  0, /* tp_as_buffer */
+  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  0, /* tp_doc */
+  0, /* tp_traverse */
+  0, /* tp_clear */
+  0, /* tp_richcompare */
+  0, /* tp_weaklistoffset */
+  0, /* tp_iter */
+  0, /* tp_iternext */
+  peloton_shared_memory_bloomfilter_methods, /* tp_methods */
   0, /* tp_members */
   0, /* tp_genset */
   0, /* tp_base */
@@ -489,14 +680,57 @@ PyTypeObject SharedMemoryBloomfilterType = {
   0,				/* tp_descr_get */
   0,				/* tp_descr_set */
   0,				/* tp_dictoffset */
-  (initproc)shared_memory_bloomfilter_init,		/* tp_init */
+  (initproc)peloton_bloomfilter_init,		/* tp_init */
   PyType_GenericAlloc,		/* tp_alloc */
-  shared_memory_bloomfilter_new,			/* tp_new */
-  PyObject_GC_Del,		/* tp_free */
+  peloton_bloomfilter_new,			/* tp_new */
+  0, 
 };
 
+PyTypeObject BloomfilterType = {
+  PyVarObject_HEAD_INIT(&PyType_Type, 0)
+  "Bloomfilter", /* tp_name */
+  sizeof(BloomfilterObject), /* tp_basicsize */
+  0, /* tp_itemsize */
+  (destructor)peloton_bloomfilter_type_dealloc, /* tp_dealloc */
+  0, /* tp_print */
+  0, /* tp_getattr */
+  0, /* tp_setattr */
+  0, /* tp_cmp */
+  0, /* tp_repr */
+  0, /* tp_as_number */
+  &SharedMemoryBloomfilterObject_sequence_methods, /* tp_as_seqeunce */
+  0, 
+  (hashfunc)PyObject_HashNotImplemented, /*tp_hash */
+  0, /* tp_call */
+  0, /* tp_str */
+  PyObject_GenericGetAttr, /* tp_getattro */
+  0, /* tp_setattro */
+  0, /* tp_as_buffer */
+  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  0, /* tp_doc */
+  0, /* tp_traverse */
+  0, /* tp_clear */
+  0, /* tp_richcompare */
+  0, /* tp_weaklistoffset */
+  0, /* tp_iter */
+  0, /* tp_iternext */
+  peloton_bloomfilter_methods, /* tp_methods */
+  0, /* tp_members */
+  0, /* tp_genset */
+  0, /* tp_base */
+  0, /* tp_dict */
+  0,				/* tp_descr_get */
+  0,				/* tp_descr_set */
+  0,				/* tp_dictoffset */
+  (initproc)peloton_bloomfilter_init,		/* tp_init */
+  PyType_GenericAlloc,		/* tp_alloc */
+  peloton_bloomfilter_new,			/* tp_new */
+  0,
+};
+
+
 PyObject *
-make_new_shared_memory_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity, double error_rate) {
+make_new_peloton_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity, double error_rate) {
   SharedMemoryBloomfilterObject *smbo = PyObject_GC_New(SharedMemoryBloomfilterObject, &SharedMemoryBloomfilterType);;
   
   if (!smbo)
@@ -504,19 +738,22 @@ make_new_shared_memory_bloomfilter(PyTypeObject *type, int fd, uint64_t capacity
   if (!(smbo->bf= create_bloomfilter(fd, capacity, error_rate))) {
     return NULL;
   }
-  smbo->weakreflist = NULL;
   return smbo;
 }
 
 
-static PyMethodDef shared_memory_bloomfiltermodule_methods[] = {
-  {"_compute_unsigned_magic_info", shared_memory_bloomfilter_compute_unsigned_magic_info, METH_VARARGS | METH_KEYWORDS, "Compute divide by multiply constants"},
+static PyMethodDef peloton_bloomfiltermodule_methods[] = {
+  {"_compute_unsigned_magic_info", peloton_bloomfilter_compute_unsigned_magic_info, METH_VARARGS | METH_KEYWORDS, "Compute divide by multiply constants"},
     {NULL, NULL, 0, NULL}
 };
 
 PyMODINIT_FUNC
-initshared_memory_bloomfilter(void) {
-  PyObject *m = Py_InitModule("shared_memory_bloomfilter", shared_memory_bloomfiltermodule_methods);
+initpeloton_bloomfilter(void) {
+  PyObject *m = Py_InitModule("peloton_bloomfilter", peloton_bloomfiltermodule_methods);
   Py_INCREF(&SharedMemoryBloomfilterType);
   PyModule_AddObject(m, "SharedMemoryBloomFilter", (PyObject *)&SharedMemoryBloomfilterType);
+  Py_INCREF(&ThreadSafeBloomfilterType);
+  PyModule_AddObject(m, "ThreadSafeBloomFilter", (PyObject *)&ThreadSafeBloomfilterType);
+  Py_INCREF(&BloomfilterType);
+  PyModule_AddObject(m, "BloomFilter", (PyObject *)&BloomfilterType);
 };
