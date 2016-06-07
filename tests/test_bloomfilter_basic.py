@@ -46,7 +46,7 @@ class BloomFilterCase(object):
         self.assertIn(50, self.bloomfilter)
 
 
-class TestBloomFilter(TestCase, BloomFilterCase):
+class TestBloomFilter(TestCase, BloomFi8lterCase):
     def setUp(self):
         self.bloomfilter = peloton_bloomfilter.BloomFilter(50, 0.001)
 

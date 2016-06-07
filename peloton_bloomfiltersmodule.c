@@ -608,7 +608,7 @@ peloton_bloomfilter_new(PyTypeObject *type, PyObject *args, PyObject *kwargs) {
 
 PyTypeObject SharedMemoryBloomfilterType = {
   PyVarObject_HEAD_INIT(&PyType_Type, 0)
-  "SharedMemoryBloomfilter", /* tp_name */
+  "SharedMemoryBloomFilter", /* tp_name */
   sizeof(SharedMemoryBloomfilterObject), /* tp_basicsize */
   0, /* tp_itemsize */
   (destructor)peloton_shared_memory_bloomfilter_type_dealloc, /* tp_dealloc */
@@ -650,7 +650,7 @@ PyTypeObject SharedMemoryBloomfilterType = {
 
 PyTypeObject ThreadSafeBloomfilterType = {
   PyVarObject_HEAD_INIT(&PyType_Type, 0)
-  "ThreadSafeBloomfilter", /* tp_name */
+  "ThreadSafeBloomFilter", /* tp_name */
   sizeof(ThreadSafeBloomfilterObject), /* tp_basicsize */
   0, /* tp_itemsize */
   (destructor)peloton_bloomfilter_type_dealloc, /* tp_dealloc */
@@ -692,7 +692,7 @@ PyTypeObject ThreadSafeBloomfilterType = {
 
 PyTypeObject BloomfilterType = {
   PyVarObject_HEAD_INIT(&PyType_Type, 0)
-  "Bloomfilter", /* tp_name */
+  "BloomFilter", /* tp_name */
   sizeof(BloomfilterObject), /* tp_basicsize */
   0, /* tp_itemsize */
   (destructor)peloton_bloomfilter_type_dealloc, /* tp_dealloc */

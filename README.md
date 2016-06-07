@@ -13,17 +13,17 @@ bloomfilter reporting `False` to an `in` query is guaranteed to not
 have the object; a bloomfilter reporting `True` likely has the tested
 object subject to a tunable false positive rate.
 
-The peloton bloomfilter library implements shared memory bloom-filters;
-multiple python processes can open a single bloomfilter and share a
-common state.
+`peloton_bloomfilters` implements three bloom-filter classes; `BloomFilter` is a plain old bloomfilterfor single threads or gevent apps; `ThreadSafeBloomFilter` releases the GIL and uses `__atomic_or_fetch` to prevent lost bits during writes and `SharedMemoryBloomfilter` supports the creation of bloomfilters that are shared between processes in real time using files and `mmap`
 
 To create a bloomfilter object you merely import the module and call
-it with three parameters: the file name to hold the shared memory mmap
+it with two or three parameters: the file name to hold the shared memory mmap
 object, the capacity of the bloomfilter and its false positive rate.
 
 
 ```
->>> from peloton_bloomfilter import SharedMemoryBloomfilter
+>>> from peloton_bloomfilter import *
+>>> bf = BloomFilter(1000, 0.001)
+>>> tsbf = ThreadSafeBloomFilter(1000, 0.001)
 >>> smbf = SharedMemoryBloomfilter("/tmp/filter", 1000, 0.001)
 ```
 
