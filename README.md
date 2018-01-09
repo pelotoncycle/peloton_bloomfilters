@@ -13,7 +13,7 @@ bloomfilter reporting `False` to an `in` query is guaranteed to not
 have the object; a bloomfilter reporting `True` likely has the tested
 object subject to a tunable false positive rate.
 
-`peloton_bloomfilters` implements three bloom-filter classes; `BloomFilter` is a plain old bloomfilterfor single threads or gevent apps; `ThreadSafeBloomFilter` releases the GIL and uses `__atomic_or_fetch` to prevent lost bits during writes and `SharedMemoryBloomfilter` supports the creation of bloomfilters that are shared between processes in real time using files and `mmap`
+`peloton_bloomfilters` implements three bloom-filter classes; `BloomFilter` is a plain old bloomfilter for single threads or gevent apps; `ThreadSafeBloomFilter` releases the GIL and uses `__atomic_or_fetch` to prevent lost bits during writes and `SharedMemoryBloomfilter` supports the creation of bloomfilters that are shared between processes in real time using files and `mmap`
 
 To create a bloomfilter object you merely import the module and call
 it with two or three parameters: the file name to hold the shared memory mmap
