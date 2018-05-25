@@ -419,7 +419,11 @@ peloton_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObject *_)
   uint64_t population = 0;
   for(i=0; i<length; ++i)
     population += __builtin_popcountll(data[i]);
+  #ifdef IS_PY3K
+  return PyLong_FromLong(population);
+  #else
   return PyInt_FromLong(population);
+  #endif
 }
 
 static Py_ssize_t
@@ -545,14 +549,25 @@ peloton_bloomfilter_compute_unsigned_magic_info
   PyObject *retval = PyTuple_New(4);
   if (!retval)
     return NULL;
+  #ifdef IS_PY3K
+  PyObject *multiplier = PyLong_FromSize_t(magic.multiplier);
+  #else
   PyObject *multiplier = PyInt_FromSize_t(magic.multiplier);
-  
+  #endif
   if (!multiplier)
     return NULL;
+  #ifdef IS_PY3K
+  PyObject *pre_shift = PyLong_FromLong(magic.pre_shift);
+  #else
   PyObject *pre_shift = PyInt_FromLong(magic.pre_shift);
+  #endif
   if (!pre_shift)
     return NULL;
+  #ifdef IS_PY3K
+  PyObject *post_shift = PyLong_FromLong(magic.post_shift);
+  #else
   PyObject *post_shift = PyInt_FromLong(magic.post_shift);
+  #endif
   if (!post_shift)
     return NULL;
   PyObject *increment = PyBool_FromLong(magic.increment);
