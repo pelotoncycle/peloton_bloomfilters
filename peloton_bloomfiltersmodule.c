@@ -45,6 +45,12 @@
 #endif
 
 
+#ifdef IS_PY3K
+#define TPFLAGS Py_TPFLAGS_DEFAULT
+#else
+#define TPFLAGS Py_TPFLAGS_HAVE_SEQUENCE_IN
+#endif
+
 struct magicu_info {
   uint64_t multiplier; // the "magic number" multiplier
   uint64_t pre_shift; // shift for the dividend before multiplying
@@ -630,7 +636,7 @@ PyTypeObject SharedMemoryBloomfilterType = {
   PyObject_GenericGetAttr, /* tp_getattro */
   0, /* tp_setattro */
   0, /* tp_as_buffer */
-  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  TPFLAGS,	/* tp_flags */
   0, /* tp_doc */
   0, /* tp_traverse */
   0, /* tp_clear */
@@ -672,7 +678,7 @@ PyTypeObject ThreadSafeBloomfilterType = {
   PyObject_GenericGetAttr, /* tp_getattro */
   0, /* tp_setattro */
   0, /* tp_as_buffer */
-  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  TPFLAGS,	/* tp_flags */
   0, /* tp_doc */
   0, /* tp_traverse */
   0, /* tp_clear */
@@ -714,7 +720,7 @@ PyTypeObject BloomfilterType = {
   PyObject_GenericGetAttr, /* tp_getattro */
   0, /* tp_setattro */
   0, /* tp_as_buffer */
-  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  TPFLAGS,	/* tp_flags */
   0, /* tp_doc */
   0, /* tp_traverse */
   0, /* tp_clear */
