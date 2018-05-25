@@ -15,32 +15,32 @@ class Case(object):
         self.assert_p_error(0.01, 75)
         self.assert_p_error(0.001, 8)
         self.assert_p_error(0.0000001,0)
-    
+
 class TestSharedMemoryErrorRate(TestCase, Case):
     def assert_p_error(self, p, errors, count=10000):
         with NamedTemporaryFile() as f:
             bf = SharedMemoryBloomFilter(f.name, count + 1, p)
-            for v in xrange(count):
+            for v in range(count):
                 bf.add(v)
             self.assertEquals(
-                sum(v in bf for v in xrange(count, count*2)),
+                sum(v in bf for v in range(count, count*2)),
                 errors)
 
 class TestThreadSafeErrorRate(TestCase, Case):
     def assert_p_error(self, p, errors, count=10000):
         bf = ThreadSafeBloomFilter(count + 1, p)
-        for v in xrange(count):
+        for v in range(count):
             bf.add(v)
         self.assertEquals(
-            sum(v in bf for v in xrange(count, count*2)),
+            sum(v in bf for v in range(count, count*2)),
             errors)
 
 class TestErrorRate(TestCase, Case):
     def assert_p_error(self, p, errors, count=10000):
         bf = BloomFilter(count + 1, p)
-        for v in xrange(count):
+        for v in range(count):
             bf.add(v)
         self.assertEquals(
-            sum(v in bf for v in xrange(count, count*2)),
+            sum(v in bf for v in range(count, count*2)),
             errors)
 

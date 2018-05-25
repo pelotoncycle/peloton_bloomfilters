@@ -14,6 +14,10 @@
 #include<sys/types.h>
 #include<unistd.h>
 
+#if PY_MAJOR_VERSION >= 3
+#define IS_PY3K
+#endif
+
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
@@ -40,6 +44,12 @@
 #define __atomic_fetch_sub(X, Y, Z) __sync_fetch_and_sub(X, Y)
 #endif
 
+
+#ifdef IS_PY3K
+#define TPFLAGS Py_TPFLAGS_DEFAULT
+#else
+#define TPFLAGS Py_TPFLAGS_HAVE_SEQUENCE_IN
+#endif
 
 struct magicu_info {
   uint64_t multiplier; // the "magic number" multiplier
@@ -409,7 +419,11 @@ peloton_bloomfilter_population(SharedMemoryBloomfilterObject *smbo, PyObject *_)
   uint64_t population = 0;
   for(i=0; i<length; ++i)
     population += __builtin_popcountll(data[i]);
+  #ifdef IS_PY3K
+  return PyLong_FromLong(population);
+  #else
   return PyInt_FromLong(population);
+  #endif
 }
 
 static Py_ssize_t
@@ -535,14 +549,25 @@ peloton_bloomfilter_compute_unsigned_magic_info
   PyObject *retval = PyTuple_New(4);
   if (!retval)
     return NULL;
+  #ifdef IS_PY3K
+  PyObject *multiplier = PyLong_FromSize_t(magic.multiplier);
+  #else
   PyObject *multiplier = PyInt_FromSize_t(magic.multiplier);
-  
+  #endif
   if (!multiplier)
     return NULL;
+  #ifdef IS_PY3K
+  PyObject *pre_shift = PyLong_FromLong(magic.pre_shift);
+  #else
   PyObject *pre_shift = PyInt_FromLong(magic.pre_shift);
+  #endif
   if (!pre_shift)
     return NULL;
+  #ifdef IS_PY3K
+  PyObject *post_shift = PyLong_FromLong(magic.post_shift);
+  #else
   PyObject *post_shift = PyInt_FromLong(magic.post_shift);
+  #endif
   if (!post_shift)
     return NULL;
   PyObject *increment = PyBool_FromLong(magic.increment);
@@ -626,7 +651,7 @@ PyTypeObject SharedMemoryBloomfilterType = {
   PyObject_GenericGetAttr, /* tp_getattro */
   0, /* tp_setattro */
   0, /* tp_as_buffer */
-  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  TPFLAGS,	/* tp_flags */
   0, /* tp_doc */
   0, /* tp_traverse */
   0, /* tp_clear */
@@ -668,7 +693,7 @@ PyTypeObject ThreadSafeBloomfilterType = {
   PyObject_GenericGetAttr, /* tp_getattro */
   0, /* tp_setattro */
   0, /* tp_as_buffer */
-  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  TPFLAGS,	/* tp_flags */
   0, /* tp_doc */
   0, /* tp_traverse */
   0, /* tp_clear */
@@ -710,7 +735,7 @@ PyTypeObject BloomfilterType = {
   PyObject_GenericGetAttr, /* tp_getattro */
   0, /* tp_setattro */
   0, /* tp_as_buffer */
-  Py_TPFLAGS_HAVE_SEQUENCE_IN,	/* tp_flags */
+  TPFLAGS,	/* tp_flags */
   0, /* tp_doc */
   0, /* tp_traverse */
   0, /* tp_clear */
@@ -751,13 +776,39 @@ static PyMethodDef peloton_bloomfiltermodule_methods[] = {
     {NULL, NULL, 0, NULL}
 };
 
+#ifdef IS_PY3K
+
+static struct PyModuleDef moduledef = {
+        PyModuleDef_HEAD_INIT,
+        "peloton_bloomfilters",
+        NULL,
+        0,
+        peloton_bloomfiltermodule_methods,
+        NULL,
+        NULL,
+        NULL,
+        NULL
+};
+
+PyMODINIT_FUNC
+PyInit_peloton_bloomfilters(void) {
+  PyObject *m = PyModule_Create(&moduledef);
+
+#else
 PyMODINIT_FUNC
 initpeloton_bloomfilters(void) {
   PyObject *m = Py_InitModule("peloton_bloomfilters", peloton_bloomfiltermodule_methods);
+
+#endif
+
   Py_INCREF(&SharedMemoryBloomfilterType);
   PyModule_AddObject(m, "SharedMemoryBloomFilter", (PyObject *)&SharedMemoryBloomfilterType);
   Py_INCREF(&ThreadSafeBloomfilterType);
   PyModule_AddObject(m, "ThreadSafeBloomFilter", (PyObject *)&ThreadSafeBloomfilterType);
   Py_INCREF(&BloomfilterType);
   PyModule_AddObject(m, "BloomFilter", (PyObject *)&BloomfilterType);
+
+ #ifdef IS_PY3K
+ return m;
+ #endif
 };
