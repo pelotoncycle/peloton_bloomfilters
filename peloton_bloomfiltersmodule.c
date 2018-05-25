@@ -14,6 +14,10 @@
 #include<sys/types.h>
 #include<unistd.h>
 
+#if PY_MAJOR_VERSION >= 3
+#define IS_PY3K
+#endif
+
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
