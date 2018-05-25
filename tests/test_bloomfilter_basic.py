@@ -19,11 +19,11 @@ class TestDivideByMultiple(TestCase):
                 N = N >> 64
                 N = N % (2 ** 64)
             N = N >> post_shift
-            self.assertEquals(N, int(n) / D)
+            self.assertEquals(N, n // D)
 
     def test(self):
-        for x in xrange(1, 1000):
-            print x
+        for x in range(1, 1000):
+            print(x)
             self.assert_divides(x)
 
 
@@ -36,12 +36,12 @@ class BloomFilterCase(object):
         self.assertIn("5", self.bloomfilter)
 
     def test_capacity(self):
-        for i in xrange(50):
+        for i in range(50):
             self.assertFalse(self.bloomfilter.add(i))
-        for i in xrange(50):
+        for i in range(50):
             self.assertIn(i, self.bloomfilter)
         self.assertTrue(self.bloomfilter.add(50))
-        for i in xrange(50):
+        for i in range(50):
             self.assertNotIn(i, self.bloomfilter)
         self.assertIn(50, self.bloomfilter)
 
@@ -64,7 +64,7 @@ class TestSharedMemoryBloomFilter(TestCase, BloomFilterCase):
         self.fd.close()
 
     def test_sharing(self):
-        print "Test started\n"
+        print("Test started")
         bf1 = self.bloomfilter
         bf2 = peloton_bloomfilters.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
         self.assertEquals(len(bf2), 0)
@@ -72,7 +72,7 @@ class TestSharedMemoryBloomFilter(TestCase, BloomFilterCase):
         self.assertNotIn(1, bf2)
 
         bf1.add(1)
-        
+
         self.assertIn(1, bf1)
         self.assertIn(1, bf2)
 
@@ -80,18 +80,18 @@ class TestSharedMemoryBloomFilter(TestCase, BloomFilterCase):
         self.assertIn(2, bf1)
         self.assertIn(2, bf2)
 
-        
+
     def test_capacity_in_sync(self):
         bf1 = self.bloomfilter
         bf2 = peloton_bloomfilters.SharedMemoryBloomFilter(self.fd.name, 50, 0.001)
         bfs = [bf1, bf2]
-        for i in xrange(50):
+        for i in range(50):
             bfs[i % 2].add(i)
-        for i in xrange(50):
+        for i in range(50):
             self.assertIn(i, bf1)
             self.assertIn(i, bf2)
         self.assertTrue(bf2.add(50))
-        for i in xrange(50):
+        for i in range(50):
             self.assertNotIn(i, bf1)
             self.assertNotIn(i, bf2)
 
